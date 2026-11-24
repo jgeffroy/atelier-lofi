@@ -2,8 +2,10 @@
 
 // WowLab engine: wow & flutter pitch modulation with tape colour (original DSP, independent of JUCE).
 //
-// Chain (wet): input gain -> tape saturation -> modulated delay (wow, flutter, random, stereo phase,
-//              wet delay; Hermite or high-quality windowed-sinc interpolation) -> tape colour (EQ) -> noise
+// Chain (wet): input gain -> tape colour (EQ) -> tape saturation -> modulated delay (wow, flutter, random,
+//              stereo phase, wet delay; Hermite or high-quality windowed-sinc interpolation) -> noise
+// Colour and saturation curves of the "15 IPS" model are fitted on measurements (log sweeps, 1 kHz level
+// ramps) of a reference plugin; "7.5 IPS" and "Cassette" are provisional until measured.
 // Mix: "Morph" scales every amount with a single signal path (no comb filtering);
 //      "Parallel" blends with the latency-aligned dry signal (chorus / flanging on purpose).
 
@@ -19,12 +21,81 @@ using retro::DcBlocker;
 using retro::kPi;
 using retro::dbToGain;
 
-struct AnalogModel { const char* name; double hpHz, lpHz, bumpHz, bumpDb, snrDb; };
+// Colour = low shelf + high shelf whose gains follow a curve over the Color knob (0, .2, .4, .6, .8, 1, 1.25, 1.5, 1.75, 2)
+struct AnalogModel
+{
+    const char* name; double snrDb, noiseLpHz, lsHz, lsQ, hsHz, hsQ, pkHz;
+    std::array<double, 10> lsDb, hsDb, pkDb;
+    bool measured;
+};
 static const AnalogModel kModels[] =
-{   // response figures follow the published specs of the three modes (+-3 dB band, A-weighted SNR)
-    { "15 IPS",   20.0, 20000.0, 50.0, 1.0, -68.0 },
-    { "7.5 IPS",  18.0, 13000.0, 40.0, 1.5, -67.0 },
-    { "Cassette", 24.0, 10000.0, 60.0, 2.0, -61.0 },
+{
+    { "15 IPS",   -68.0, 20000.0, 136.9, 0.51, 12084.0, 0.44, 1051.0,
+      { 0.0, 0.39, 0.68, 0.97, 1.26, 1.56, 1.99, 2.42, 2.86, 3.29 },
+      { 0.0, -1.29, -2.27, -3.24, -4.22, -5.19, -7.51, -9.83, -12.15, -14.47 },
+      { 0.0, 0.0, 0.02, 0.04, 0.06, 0.07, -0.09, -0.25, -0.40, -0.56 }, true },
+    { "7.5 IPS",  -67.0, 13000.0, 130.0, 0.55, 9500.0, 0.45, 1000.0,
+      { 0.0, 0.50, 0.88, 1.26, 1.64, 2.00, 2.55, 3.10, 3.65, 4.20 },
+      { 0.0, -1.9, -3.4, -4.9, -6.4, -7.9, -11.4, -14.9, -18.4, -21.9 },
+      { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -0.1, -0.3, -0.5, -0.7 }, false },
+    { "Cassette", -61.0, 10000.0, 110.0, 0.55, 7000.0, 0.50, 1000.0,
+      { 0.0, 0.60, 1.05, 1.50, 1.95, 2.40, 3.00, 3.60, 4.20, 4.80 },
+      { 0.0, -2.6, -4.6, -6.6, -8.6, -10.6, -14.5, -18.4, -22.3, -26.2 },
+      { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -0.1, -0.3, -0.5, -0.7 }, false },
+};
+
+static double curveAt (const std::array<double, 10>& t, double c)
+{
+    static const double k[10] = { 0.0, 0.2, 0.4, 0.6, 0.8, 1.0, 1.25, 1.5, 1.75, 2.0 };
+    c = std::clamp (c, 0.0, 2.0);
+    for (int i = 1; i < 10; ++i)
+        if (c <= k[i]) return t[(size_t) i - 1] + (t[(size_t) i] - t[(size_t) i - 1]) * (c - k[i - 1]) / (k[i] - k[i - 1]);
+    return t[9];
+}
+
+// RBJ shelf with explicit Q
+static void setShelf (Biquad& b, bool high, double fs, double f, double db, double Q)
+{
+    const double A = std::pow (10.0, db / 40.0), w = 2 * kPi * std::clamp (f, 5.0, fs * 0.45) / fs, c = std::cos (w);
+    const double sq = 2 * std::sqrt (A) * (std::sin (w) / (2 * Q));
+    if (! high)
+        b.set (A * ((A + 1) - (A - 1) * c + sq), 2 * A * ((A - 1) - (A + 1) * c), A * ((A + 1) - (A - 1) * c - sq),
+               (A + 1) + (A - 1) * c + sq, -2 * ((A - 1) + (A + 1) * c), (A + 1) + (A - 1) * c - sq);
+    else
+        b.set (A * ((A + 1) + (A - 1) * c + sq), -2 * A * ((A - 1) + (A + 1) * c), A * ((A + 1) + (A - 1) * c - sq),
+               (A + 1) - (A - 1) * c + sq, 2 * ((A - 1) - (A + 1) * c), (A + 1) - (A - 1) * c - sq);
+}
+
+// Tape saturation: cubic soft clip (u - u^3/3 up to |u| = 1) followed by a weak linear tail, with
+// first-order anti-derivative anti-aliasing. y = g0 * f(a x) / a, so the small-signal gain is g0.
+struct TapeSat
+{
+    static constexpr double kTail = 0.11;
+    double x1 = 0.0; bool first = true;
+    void reset() { x1 = 0.0; first = true; }
+    static double f (double u)
+    {
+        const double au = std::abs (u), s = u < 0 ? -1.0 : 1.0;
+        return au < 1.0 ? u - u * u * u / 3.0 : s * (2.0 / 3.0 + kTail * (au - 1.0));
+    }
+    static double F (double u)   // antiderivative of f (even)
+    {
+        const double au = std::abs (u);
+        if (au < 1.0) return au * au / 2.0 - au * au * au * au / 12.0;
+        const double d = au - 1.0;
+        return 5.0 / 12.0 + 2.0 / 3.0 * d + kTail * d * d / 2.0;
+    }
+    double process (double x, double a, double g0)
+    {
+        const double u = a * x, u1 = a * x1;
+        double y;
+        if (first) { y = f (u); first = false; }
+        else if (std::abs (u - u1) > 1e-6) y = (F (u) - F (u1)) / (u - u1);
+        else y = f (0.5 * (u + u1));
+        const double out = g0 / a * (u + (y - 0.5 * (u + u1)));   // only the non-linear residual is averaged: flat linear response
+        x1 = x;
+        return out;
+    }
 };
 
 enum RandomTarget { RndOff = 0, RndSpeed, RndAmount, RndShape, RndStereo, RndOffset, RndAmountSpeed, RndWetDelay };
@@ -95,7 +166,6 @@ public:
         fs = sampleRate;
         for (auto& b : buf) b.init ((int) (fs * 1.2));
         for (auto& b : dryBuf) b.init (64);
-        for (auto& d : dc) d.set (fs);
         reset();
         setParams (p);
     }
@@ -104,8 +174,8 @@ public:
     {
         for (int c = 0; c < 2; ++c)
         {
-            buf[c].clear(); dryBuf[c].clear(); sat[c].reset(); dc[c].reset();
-            hp[c].reset(); lp1[c].reset(); lp2[c].reset(); bump[c].reset(); noiseLp[c].reset();
+            buf[c].clear(); dryBuf[c].clear(); sat[c].reset();
+            ls[c].reset(); hs[c].reset(); pk[c].reset(); noiseLp[c].reset();
             noiseRng[c].s = 0x9E3779B9u + (uint32_t) c * 2654435761u;
         }
         phase = 0; rndCur = rndTarget = 0; rndStepIndex = -1; freeTime = 0; smoothInit = false; fadeIn = 1.0;
@@ -117,7 +187,7 @@ public:
         if (np.model != p.model || np.analogOn != p.analogOn || np.hq != p.hq)
         {
             // structural change: clear the colour filters and fade the wet signal back in (no click)
-            for (int c = 0; c < 2; ++c) { hp[c].reset(); lp1[c].reset(); lp2[c].reset(); bump[c].reset(); }
+            for (int c = 0; c < 2; ++c) { ls[c].reset(); hs[c].reset(); pk[c].reset(); sat[c].reset(); }
             fadeIn = 0.0;
         }
         p = np;
@@ -129,20 +199,26 @@ public:
             p.noiseGainDb += 20.0 * std::log10 (std::max (m, 1e-5));
         }
         const auto& md = kModels[std::clamp (p.model, 0, 2)];
-        const double ca = p.color <= 1.0 ? p.color : 1.0 + (p.color - 1.0) * 0.6;   // progressive above 100 %
-        auto morph = [ca] (double flat, double f, double lo, double hi)
-        { return std::clamp (std::exp (std::log (flat) + ca * (std::log (f) - std::log (flat))), lo, hi); };
+        const double cc = std::clamp (p.color, 0.0, 2.0);
         for (int c = 0; c < 2; ++c)
         {
-            hp[c].highpass (fs, morph (5.0, md.hpHz, 5.0, 400.0), 0.7071);
-            lp1[c].lowpass (fs, morph (22000.0, md.lpHz, 1000.0, 22000.0), 0.54);
-            lp2[c].lowpass (fs, morph (22000.0, md.lpHz * 1.15, 1000.0, 22000.0), 1.25);
-            bump[c].peak (fs, md.bumpHz, 1.0, md.bumpDb * ca);
-            noiseLp[c].lowpass (fs, md.lpHz, 0.7071);
+            setShelf (ls[c], false, fs, md.lsHz, curveAt (md.lsDb, cc), md.lsQ);
+            setShelf (hs[c], true,  fs, md.hsHz, curveAt (md.hsDb, cc), md.hsQ);
+            pk[c].peak (fs, md.pkHz, 0.7, curveAt (md.pkDb, cc));
+            noiseLp[c].lowpass (fs, md.noiseLpHz, 0.7071);
         }
         noiseGain = dbToGain (md.snrDb + p.noiseGainDb + (p.color > 1.0 ? 6.0 * (p.color - 1.0) : 0.0));
         if (p.noiseGainDb <= -95.9 || ! p.analogOn) noiseGain = 0.0;
-        satDrive = p.saturation <= 1.0 ? 0.6 * p.saturation : 0.6 * p.saturation * p.saturation * p.saturation;
+        // saturation: cubic drive a (about sqrt of the knob up to 100 %, then steeper) and small-signal gain above 100 %
+        const double sv = std::clamp (p.saturation, 0.0, 2.0);
+        if (sv <= 1.0) { satA = 0.513 * std::sqrt (sv); satG = 1.0; }
+        else
+        {
+            const double lnA = sv <= 1.25 ? std::log (0.513) + (std::log (0.776) - std::log (0.513)) * (sv - 1.0) / 0.25
+                                          : std::log (0.776) + (std::log (2.666) - std::log (0.776)) * (sv - 1.25) / 0.75;
+            const double gdb = sv <= 1.25 ? 0.6 * (sv - 1.0) / 0.25 : 0.6 + 2.4 * (sv - 1.25) / 0.75;
+            satA = std::exp (lnA); satG = dbToGain (gdb);
+        }
         base = p.hq ? kBaseHq : kBaseNormal;
         smoothK = 1.0 - std::exp (-1.0 / (0.06 * fs));
     }
@@ -195,9 +271,13 @@ public:
         const double slope = 2 * kPi * (speed * wowA + flutHz * flutA) * shapeSlope;
         if (slope > 0.9) { const double k = 0.9 / slope; wowA *= k; flutA *= k; }
 
-        // ---- tape: record saturation
-        if (p.analogOn && satDrive > 0.005)
-            for (int c = 0; c < 2; ++c) x[c] = dc[c].process (sat[c].process (x[c] * satDrive, false, 0.06) / satDrive);
+        // ---- tape: colour EQ, then record saturation
+        if (p.analogOn)
+            for (int c = 0; c < 2; ++c)
+            {
+                x[c] = pk[c].process (hs[c].process (ls[c].process (x[c])));
+                if (satA > 1e-4) x[c] = sat[c].process (x[c], satA, satG);
+            }
 
         // ---- smoothing: depth, shape, phases and wet delay glide (about 60 ms) instead of jumping,
         //      so automation and preset changes never make the playback head skip (clicks)
@@ -219,14 +299,9 @@ public:
             y[c] = p.hq ? readSinc (buf[c], d) : buf[c].read (d);
         }
 
-        // ---- playback colour and noise
-        if (p.analogOn)
-            for (int c = 0; c < 2; ++c)
-            {
-                double v = bump[c].process (lp2[c].process (lp1[c].process (hp[c].process (y[c]))));
-                if (noiseGain > 0.0) v += noiseLp[c].process (noiseRng[c].next()) * noiseGain * 1.7;
-                y[c] = v;
-            }
+        // ---- tape noise
+        if (p.analogOn && noiseGain > 0.0)
+            for (int c = 0; c < 2; ++c) y[c] += noiseLp[c].process (noiseRng[c].next()) * noiseGain * 1.7;
 
         if (fadeIn < 1.0) fadeIn = std::min (1.0, fadeIn + 1.0 / (0.015 * fs));
 
@@ -297,15 +372,14 @@ private:
     }
     static const SincTable& table() { static const SincTable t; return t; }
 
-    double fs = 48000.0, base = kBaseNormal, phase = 0.0, noiseGain = 0.0, satDrive = 0.6, freeTime = 0.0;
+    double fs = 48000.0, base = kBaseNormal, phase = 0.0, noiseGain = 0.0, satA = 0.513, satG = 1.0, freeTime = 0.0;
     double rndCur = 0.0, rndTarget = 0.0; long long rndStepIndex = -1;
     double fadeIn = 1.0, smoothK = 0.001, smWow = 0, smFlut = 0, smShape = 0, smStereo = 0, smOffset = 0, smWet = 0; bool smoothInit = false;
     bool hostPlaying = false; double hostPpq = 0.0, hostBpm = 120.0; long long hostSample = -1, blockSample = 0;
     Params p;
     std::array<retro::DelayBuf, 2> buf, dryBuf;
-    std::array<AdaaSat, 2> sat;
-    std::array<DcBlocker, 2> dc;
-    std::array<Biquad, 2> hp, lp1, lp2, bump, noiseLp;
+    std::array<TapeSat, 2> sat;
+    std::array<Biquad, 2> ls, hs, pk, noiseLp;
     std::array<Rng, 2> noiseRng;
     Rng freeRng;
     double prevDelay[2] = { -1, -1 };
