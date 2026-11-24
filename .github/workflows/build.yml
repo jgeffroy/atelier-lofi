@@ -1,0 +1,52 @@
+name: Build AtelierDSP Lo-Fi plugins (VST3)
+
+# Compile RetroDeck et SampleGrade pour macOS et Windows dans le cloud GitHub.
+# Les .vst3 sont téléchargeables depuis l'onglet Actions > run > Artifacts.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  build-macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Clone JUCE
+        run: git clone --depth 1 --branch 8.0.15 https://github.com/juce-framework/JUCE.git
+
+      - name: Configure
+        run: cmake -B build -S . -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="x86_64;arm64" -DCMAKE_OSX_DEPLOYMENT_TARGET=14.4
+
+      - name: Build
+        run: cmake --build build --config Release --parallel 3
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AtelierLoFi-macOS
+          path: |
+            build/RetroDeck_artefacts/Release/VST3/
+            build/SampleGrade_artefacts/Release/VST3/
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Clone JUCE
+        run: git clone --depth 1 --branch 8.0.15 https://github.com/juce-framework/JUCE.git
+
+      - name: Configure
+        run: cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release --parallel 3
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AtelierLoFi-Windows
+          path: |
+            build/RetroDeck_artefacts/Release/VST3/
+            build/SampleGrade_artefacts/Release/VST3/
