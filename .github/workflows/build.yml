@@ -1,6 +1,6 @@
 name: Build AtelierDSP Lo-Fi plugins (VST3)
 
-# Compile RetroDeck, RetroDeck 2, SampleGrade et WowLab pour macOS et Windows dans le cloud GitHub.
+# Compile RetroDeck, RetroDeck 2, SampleGrade, WowLab et VinylSim pour macOS et Windows dans le cloud GitHub.
 # Les .vst3 sont téléchargeables depuis l'onglet Actions > run > Artifacts.
 
 on:
@@ -31,6 +31,7 @@ jobs:
             build/SampleGrade_artefacts/Release/VST3/
             build/WowLab_artefacts/Release/VST3/
             build/RetroDeck2_artefacts/Release/VST3/
+            build/VinylSim_artefacts/Release/VST3/
 
   build-windows:
     runs-on: windows-latest
@@ -54,3 +55,4 @@ jobs:
             build/SampleGrade_artefacts/Release/VST3/
             build/WowLab_artefacts/Release/VST3/
             build/RetroDeck2_artefacts/Release/VST3/
+            build/VinylSim_artefacts/Release/VST3/

@@ -98,3 +98,25 @@ target_compile_definitions(RetroDeck2 PUBLIC JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 
 target_link_libraries(RetroDeck2
     PRIVATE juce::juce_audio_utils
     PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_lto_flags juce::juce_recommended_warning_flags)
+
+# ---------------------------------------------------------------------------
+# VinylSim: vinyl record simulator (cartridge / tip resonance, stylus tracing, brilliance)
+# ---------------------------------------------------------------------------
+juce_add_plugin(VinylSim
+    COMPANY_NAME "AtelierDSP"
+    PLUGIN_MANUFACTURER_CODE Atdp
+    PLUGIN_CODE Vnsm
+    FORMATS VST3
+    PRODUCT_NAME "VinylSim"
+    IS_SYNTH FALSE
+    NEEDS_MIDI_INPUT FALSE
+    NEEDS_MIDI_OUTPUT FALSE
+    EDITOR_WANTS_KEYBOARD_FOCUS FALSE
+    VST3_CATEGORIES "Fx" "Distortion"
+)
+
+target_sources(VinylSim PRIVATE Source/VinylSim/VinylProcessor.cpp Source/VinylSim/VinylEditor.cpp)
+target_compile_definitions(VinylSim PUBLIC JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0)
+target_link_libraries(VinylSim
+    PRIVATE juce::juce_audio_utils
+    PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_lto_flags juce::juce_recommended_warning_flags)

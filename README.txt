@@ -5,9 +5,13 @@ AtelierDSP Lo-Fi : 4 plugins VST3 originaux, dans un dépôt séparé des 3 prem
   - SampleGrade : grades d'échantillonnage d'un sampler de phrases de la fin des années 90
                   (Hi-Fi 31,25 kHz, Standard/Long 15,63 kHz, Lo-Fi 1 7,81 kHz, Lo-Fi 2 3,91 kHz)
   - WowLab      : pleurage et scintillement (wow & flutter) avec couleur bande, aléatoire, synchro tempo, mode HQ
+  - VinylSim    : simulateur de vinyle centré sur la brillance : résonance électrique de la cellule (bobine + charge R/C),
+                  résonance de la pointe, distorsion de lecture paire ("Sheen", modèle géométrique de la pointe sphérique),
+                  limiteur d'aigus de gravure, EQ elliptique, voile, surface. Plages x1/x2/x4/x8 sur brillance, sheen,
+                  limiteur, voile et surface. Latence fixe d'environ 7,5 ms (compensée par le DAW).
 
 Compilation : poussez ce dossier sur un nouveau dépôt GitHub ; l'onglet Actions produit l'artefact AtelierLoFi-macOS.
-Installation macOS (14.4 ou plus) : copiez uniquement RetroDeck.vst3, "RetroDeck 2.vst3", SampleGrade.vst3 et WowLab.vst3 dans ~/Library/Audio/Plug-Ins/VST3/,
+Installation macOS (14.4 ou plus) : copiez uniquement RetroDeck.vst3, "RetroDeck 2.vst3", SampleGrade.vst3, WowLab.vst3 et VinylSim.vst3 dans ~/Library/Audio/Plug-Ins/VST3/,
 puis pour chacun : xattr -dr com.apple.quarantine <bundle> ; codesign --force --deep -s - <bundle>
 Presets utilisateur : ~/Documents/AtelierDSP/RetroDeck et ~/Documents/AtelierDSP/SampleGrade
 Tests du moteur (Linux/macOS) : g++ -std=c++17 -O2 -ISource tests/test_retro.cpp -o tr && ./tr
